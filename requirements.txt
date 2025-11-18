@@ -1,3 +1,1 @@
-cat > requirements.txt <<'EOF'
 oci>=2.0.0
-EOF
