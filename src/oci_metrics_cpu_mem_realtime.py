@@ -1,71 +1,68 @@
-import oci
-import csv
+
+import os
 from datetime import datetime, timedelta, timezone
+
+import oci
 from oci.monitoring.models import SummarizeMetricsDataDetails
 
+INTERVAL = "5m"
+
 cfg = oci.config.from_file()
+tenancy_id = cfg["tenancy"]
+identity = oci.identity.IdentityClient(cfg)
+regions = identity.list_region_subscriptions(tenancy_id).data
 
-compute = oci.core.ComputeClient(cfg)
-monitoring = oci.monitoring.MonitoringClient(cfg)
+now = datetime.now(timezone.utc)
+start = now - timedelta(minutes=30)
+end = now
 
-compartment_id = cfg["tenancy"]
 
-end = datetime.now(timezone.utc)
-start = end - timedelta(minutes=15)
+def main():
+    print("Relatório rápido de CPU/Mem (últimos 30 minutos)...\n")
 
-def get_metric(query):
-    details = SummarizeMetricsDataDetails(
-        namespace="oci_computeagent",
-        query=query,
-        start_time=start,
-        end_time=end
-    )
-    resp = monitoring.summarize_metrics_data(
-        compartment_id=compartment_id,
-        summarize_metrics_data_details=details
-    )
-    if resp.data and resp.data[0].aggregated_datapoints:
-        dps_sorted = sorted(resp.data[0].aggregated_datapoints, key=lambda x: x.timestamp)
-        return dps_sorted[-1].value
-    return None
+    for region in regions:
+        region_name = region.region_name
+        print(f"=== Região: {region_name} ===")
+        region_cfg = dict(cfg)
+        region_cfg["region"] = region_name
 
-# lista de instâncias
-instances = oci.pagination.list_call_get_all_results(
-    compute.list_instances,
-    compartment_id=compartment_id
-).data
+        compute = oci.core.ComputeClient(region_cfg)
+        monitoring = oci.monitoring.MonitoringClient(region_cfg)
 
-instances = [i for i in instances if i.lifecycle_state == "RUNNING"]
+        instances = oci.pagination.list_call_get_all_results(
+            compute.list_instances,
+            compartment_id=tenancy_id,
+        ).data
 
-rows = []
+        running = [i for i in instances if i.lifecycle_state == 'RUNNING']
+        if not running:
+            print("  Nenhuma instância RUNNING.\n")
+            continue
 
-for inst in instances:
-    cpu_query = f'CpuUtilization[5m]{{resourceId = "{inst.id}"}}.mean()'
-    mem_query = f'MemoryUtilization[5m]{{resourceId = "{inst.id}"}}.mean()'
+        for inst in running:
+            print(f"- {inst.display_name} ({inst.id})")
 
-    cpu = get_metric(cpu_query)
-    mem = get_metric(mem_query)
+            for metric in ("CpuUtilization", "MemoryUtilization"):
+                query = f'{metric}[{INTERVAL}]{{resourceId = "{inst.id}"}}.mean()'
+                details = SummarizeMetricsDataDetails(
+                    namespace="oci_computeagent",
+                    query=query,
+                    start_time=start,
+                    end_time=end,
+                )
 
-    # detalhes da forma (shape)
-    shape = inst.shape
-    ocpus = inst.shape_config.ocpus if inst.shape_config else None
-    mem_gb = inst.shape_config.memory_in_gbs if inst.shape_config else None
+                resp = monitoring.summarize_metrics_data(
+                    compartment_id=inst.compartment_id,
+                    summarize_metrics_data_details=details,
+                )
 
-    rows.append({
-        "instance_name": inst.display_name,
-        "instance_ocid": inst.id,
-        "shape": shape,
-        "ocpus": ocpus,
-        "memory_gb": mem_gb,
-        "cpu_percent": round(cpu, 2) if cpu is not None else "no-data",
-        "mem_percent": round(mem, 2) if mem is not None else "no-data"
-    })
+                if not resp.data or not resp.data[0].aggregated_datapoints:
+                    print(f"  {metric}: sem dados")
+                    continue
 
-csv_file = "Relatorio_CPU_Memoria.csv"
+                last = resp.data[0].aggregated_datapoints[-1]
+                print(f"  {metric}: {last.value:.2f} % (timestamp {last.timestamp})")
+            print()
 
-with open(csv_file, "w", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-    writer.writeheader()
-    writer.writerows(rows)
-
-print(f"Relatório gerado: {csv_file}")
+if __name__ == "__main__":
+    main()

@@ -1,3 +1,4 @@
+
 import os
 import csv
 import time
@@ -190,10 +191,11 @@ def main():
                     compute.list_instances,
                     compartment_id=comp_id,
                 ).data
-            except Exception:
+            except Exception as e:
+                print(f"  [!] Erro ao listar instâncias em '{comp_name}': {e}")
                 continue
 
-            running = [i for i in instances if i.lifecycle_state == "RUNNING"]
+            running = [i for i in instances if i.lifecycle_state == 'RUNNING']
             if not running:
                 continue
 

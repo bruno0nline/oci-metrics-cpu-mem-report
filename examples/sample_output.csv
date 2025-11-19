@@ -1,0 +1,3 @@
+region,compartment,instance_name,cpu_mean_percent,mem_mean_percent,finops_recommendation
+sa-saopaulo-1,PRD,vm-app01,9.2,21.5,DOWNSIZE
+sa-saopaulo-1,PRD,vm-db01,67.3,88.1,UPSCALE
