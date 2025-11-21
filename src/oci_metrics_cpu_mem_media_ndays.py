@@ -140,23 +140,22 @@ def finops_recommendation(cpu_flag, mem_flag):
 
 def parse_baseline(shape_cfg):
     """
-    Converte o baseline do OCI para algo legível:
-    - None                        -> ("Desativada", "NO", "N/A")
-    - BASELINE_1_8 (12.5%)        -> ("12.5%",    "YES", "BASELINE_1_8")
-    - BASELINE_1_2 (50%)          -> ("50%",      "YES", "BASELINE_1_2")
-    - BASELINE_1_1 (100% / full)  -> ("100%",     "YES", "BASELINE_1_1")
+    Interpretação correta de baseline:
+    - None ou BASELINE_1_1 -> NÃO expansível (linha de base desativada)
+    - BASELINE_1_8         -> expansível 12.5%
+    - BASELINE_1_2         -> expansível 50%
     """
     if not shape_cfg:
         return "Desativada", "NO", "N/A"
 
     baseline = getattr(shape_cfg, "baseline_ocpu_utilization", None)
-    if not baseline:
-        return "Desativada", "NO", "N/A"
+    if not baseline or baseline == "BASELINE_1_1":
+        # Tratar como instância normal, sem burst
+        return "Desativada", "NO", baseline or "N/A"
 
     mapping = {
         "BASELINE_1_8": "12.5%",
         "BASELINE_1_2": "50%",
-        "BASELINE_1_1": "100%",
     }
     human = mapping.get(baseline, baseline)
     return human, "YES", baseline
@@ -261,8 +260,8 @@ def main():
                     "ocpus": ocpus,
                     "memory_gb": mem_gb,
                     "burstable_enabled": burstable_enabled,      # YES/NO
-                    "baseline_percent": baseline_percent,        # Desativada / 12.5% / 50% / 100%
-                    "baseline_raw": baseline_raw,                # BASELINE_1_8 / BASELINE_1_2 / BASELINE_1_1 / N/A
+                    "baseline_percent": baseline_percent,        # Desativada / 12.5% / 50%
+                    "baseline_raw": baseline_raw,                # BASELINE_1_8 / BASELINE_1_2 / N/A / BASELINE_1_1
                     "cpu_mean_percent": round(cpu_mean, 2) if cpu_mean else "no-data",
                     "cpu_p95_percent": round(cpu_p95, 2) if cpu_p95 else "no-data",
                     "mem_mean_percent": round(mem_mean, 2) if mem_mean else "no-data",
