@@ -8,7 +8,7 @@ from oci.monitoring.models import SummarizeMetricsDataDetails
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
-# ================= CONFIGURAÇÕES =================
+# ================= CONFIG =================
 DAYS = int(os.getenv("METRICS_DAYS", "30"))
 INTERVAL = "5m"
 
@@ -22,18 +22,19 @@ MEM_HIGH = 85
 MAX_RETRIES = 3
 RETRY_SLEEP = 3
 
-homedir = os.path.expanduser("~")
-CSV_PATH = os.path.join(homedir, f"Relatorio_CPU_Memoria_media_{DAYS}d_multi_region.csv")
-XLSX_PATH = os.path.join(homedir, f"Relatorio_CPU_Memoria_media_{DAYS}d_multi_region.xlsx")
-# ================================================
+HOME = os.path.expanduser("~")
+CSV_PATH = os.path.join(HOME, f"Relatorio_CPU_MEM_{DAYS}d.csv")
+XLSX_PATH = os.path.join(HOME, f"Relatorio_CPU_MEM_{DAYS}d.xlsx")
+# =========================================
 
 cfg = oci.config.from_file()
 tenancy_id = cfg["tenancy"]
 identity = oci.identity.IdentityClient(cfg)
 
-# ---------- helpers ----------
+
 def get_regions():
     return [r.region_name for r in identity.list_region_subscriptions(tenancy_id).data]
+
 
 def get_compartments():
     comps = oci.pagination.list_call_get_all_results(
@@ -44,13 +45,6 @@ def get_compartments():
     root = identity.get_compartment(tenancy_id).data
     return [c for c in comps if c.lifecycle_state == "ACTIVE"] + [root]
 
-def mean_p95(values):
-    if not values:
-        return None, None
-    values = sorted(values)
-    mean = sum(values) / len(values)
-    p95 = values[int(len(values) * 0.95) - 1]
-    return mean, p95
 
 def summarize_with_retry(monitoring, compartment_id, details):
     for attempt in range(1, MAX_RETRIES + 1):
@@ -64,6 +58,16 @@ def summarize_with_retry(monitoring, compartment_id, details):
                 time.sleep(RETRY_SLEEP)
                 continue
             raise
+
+
+def mean_p95(values):
+    if not values:
+        return None, None
+    values = sorted(values)
+    mean = sum(values) / len(values)
+    p95 = values[int(len(values) * 0.95) - 1]
+    return mean, p95
+
 
 def get_metric(monitoring, compartment_id, instance_id, metric, start, end):
     query = f'{metric}[{INTERVAL}]{{resourceId = "{instance_id}"}}.mean()'
@@ -79,25 +83,6 @@ def get_metric(monitoring, compartment_id, instance_id, metric, start, end):
     values = [d.value for d in resp.data[0].aggregated_datapoints if d.value is not None]
     return mean_p95(values)
 
-def parse_baseline(instance):
-    """
-    Extrai baseline de OCPU corretamente via shape_config
-    Compatível com SDK OCI atual
-    """
-
-    shape_cfg = getattr(instance, "shape_config", None)
-    baseline = getattr(shape_cfg, "baseline_ocpu_utilization", None)
-
-    if not baseline:
-        return "NO", "Desativada", ""
-
-    mapping = {
-        "BASELINE_1_8": "12.5%",
-        "BASELINE_1_2": "50%",
-        "BASELINE_1_1": "100%"
-    }
-
-    return "YES", mapping.get(baseline, baseline), baseline
 
 def finops(cpu_mean, cpu_p95, mem_mean, mem_p95):
     cpu_mean = cpu_mean or 0
@@ -115,7 +100,7 @@ def finops(cpu_mean, cpu_p95, mem_mean, mem_p95):
         return "UPSCALE"
     return "KEEP"
 
-# ---------- main ----------
+
 def main():
     regions = get_regions()
     compartments = get_compartments()
@@ -125,10 +110,10 @@ def main():
 
     rows = []
 
-    print(f"\n📊 Coletando métricas dos últimos {DAYS} dias\n")
+    print(f"\n📊 Coletando CPU/Memória ({DAYS} dias)\n")
 
     for region in regions:
-        print(f"\n🟢 Região: {region}")
+        print(f"🟢 Região: {region}")
         cfg_r = dict(cfg)
         cfg_r["region"] = region
 
@@ -142,6 +127,7 @@ def main():
                     compartment_id=comp.id
                 ).data
             except oci.exceptions.ServiceError:
+                print(f"⚠️ Sem acesso ao compartment {comp.name}")
                 continue
 
             running = [i for i in instances if i.lifecycle_state == "RUNNING"]
@@ -151,9 +137,6 @@ def main():
             print(f"  📁 {comp.name} | RUNNING: {len(running)}")
 
             for inst in running:
-                # 🔴 AQUI está a correção crítica
-                inst_full = compute.get_instance(inst.id).data
-
                 cpu_mean, cpu_p95 = get_metric(
                     monitoring, comp.id, inst.id, "CpuUtilization", start, end
                 )
@@ -161,29 +144,19 @@ def main():
                     monitoring, comp.id, inst.id, "MemoryUtilization", start, end
                 )
 
-                burst, baseline, baseline_raw = parse_baseline(inst_full)
-
                 rows.append({
                     "region": region,
                     "compartment": comp.name,
                     "instance_name": inst.display_name,
-                    "instance_ocid": inst.id,
                     "shape": inst.shape,
                     "ocpus": getattr(inst.shape_config, "ocpus", None),
                     "memory_gb": getattr(inst.shape_config, "memory_in_gbs", None),
-                    "burstable_enabled": burst,
-                    "baseline_percent": baseline,
-                    "baseline_raw": baseline_raw,
                     "cpu_mean_percent": cpu_mean,
                     "cpu_p95_percent": cpu_p95,
                     "mem_mean_percent": mem_mean,
                     "mem_p95_percent": mem_p95,
-                    "finops_recommendation": finops(cpu_mean, cpu_p95, mem_mean, mem_p95)
+                    "finops_recommendation": finops(cpu_mean, cpu_p95, mem_mean, mem_p95),
                 })
-
-    if not rows:
-        print("Nenhuma instância encontrada.")
-        return
 
     headers = list(rows[0].keys())
 
@@ -194,7 +167,7 @@ def main():
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "FinOps"
+    ws.title = "CPU_MEM"
 
     ws.append(headers)
 
@@ -220,6 +193,7 @@ def main():
     print("\n✅ Relatórios gerados:")
     print(f"➡ CSV : {CSV_PATH}")
     print(f"➡ XLSX: {XLSX_PATH}")
+
 
 if __name__ == "__main__":
     main()
